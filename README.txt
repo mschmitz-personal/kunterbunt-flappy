@@ -1,3 +1,0 @@
-Flappy Bird like clone
-
- 

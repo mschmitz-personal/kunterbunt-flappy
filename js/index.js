@@ -2,35 +2,43 @@
 // *****************************************************************
 // Global Variables
 // *****************************************************************
+
+// Constants influencing game behavior
+var STARTING_WALL_GAP       = 150;
+var STARTING_WALL_DISTANCE  = 250;
+var STARTING_WALL_SPEED     = 3.5; 
+ 
+var DIFFICULTY_ADJUSTMENT_SPEED     = 1.2;
+var DIFFICULTY_ADJUSTMENT_GAP       = 0.85;  
+var DIFFICULTY_ADJUSTMENT_DISTANCE  = 0.85;  
+
+// Objects related to drawing and animation
 var canvas;     // canvas used to draw on
 var ctx         // context of canvas
 var raf;        // animation frame
 
-var myplane;    // object representing the plane of the player
-var myscore;    // object representing the current score 
-var myhiscore;  // object representing the hiscore since starting
-var mywalls;    // array of wall objects
-var mymessages; // array of messages
+// Objects representing entities in te game (plane, walls, messenges, scores etc)
+var plane;      // object representing the plane of the player
+var messageMgr; // Message Manager to handle queue of messages
+var wallMgr;    // Wall Manager to handle queue of walls
 
-var playing;         // boolean (true if currently playning)
-var wall_distance;   // distance between walls (x)
-var wall_gap;        // gap in wall (y)
-var wall_speed;      // speed of walls
-
-var testimage;
+// Game status
+var score;      // object representing the current score 
+var hiscore;    // object representing the hiscore since starting
+var playing;    // boolean (true if currently playning)
 
 
 // *****************************************************************
 // Classes
 // *****************************************************************
 class Message {
-    constructor(text, x, y, time_to_live) {
+    constructor(text, x=180, y=130, time_to_live=90, font = '24px serif', color='black') {
         this.text = text;
         this.x = x;
         this.y = y;
         this.ttl = time_to_live;
-        this.font =  '24px serif';
-        this.color = 'black';
+        this.font =  font;
+        this.color = color;
         this.time = 0;
     }
 
@@ -50,6 +58,35 @@ class Message {
 
     age() {
         this.time = this.time + 1;
+    }
+}
+
+class MessageMgr {
+    constructor() {
+        this.messages = [];
+    }
+
+    add(message) {
+        this.messages.push(message);
+    }
+
+    clear() {
+        this.messages=[];
+    }
+
+    draw() {
+        // draw each message
+        for (var i = 0; i < this.messages.length; i++) {
+            this.messages[i].draw();
+        }
+    }
+
+    age() {
+        // age each message and check if still alive or remove from message queue
+        this.messages = this.messages.filter( function(value, index, ass) {
+                value.age();
+                return value.alive();
+        })
     }
 }
 
@@ -104,14 +141,104 @@ class Wall {
         ctx.fill();
     }
 
-    move() {
+    move(speed) {
         // apply accelration
-        this.x1 -= wall_speed;
-        this.x2 -= wall_speed;
+        this.x1 -= speed;
+        this.x2 -= speed;
     }
 
     contains(x,y) {
         return this.x1<=x && x<=this.x2 && this.y1<=y && y<=this.y2 ;
+    }
+}
+
+class WallMgr {
+    constructor() {
+        this.walls = [];
+        this.distance=200;     // distance between walls (x)
+        this.gap=50;           // gap in wall (y)
+        this.speed=3;          // speed of walls
+    }
+
+    add(wall) {
+        this.walls.push(wall);
+    }
+
+    clear() {
+        this.walls = [];
+    }
+
+    draw() {
+        for (var i = 0; i < this.walls.length; i++) {
+            this.walls[i].draw();
+        }    
+    }
+
+    process() {
+        // 1) shall we add some walls?
+        if ( this.walls.length == 0) {
+            // if no walls yet, then add a new one for sure!!
+            this.add_random_walls(); 
+        } else {
+            // if we have walls, then check that we leave enough distance to last wall
+            var last_wall = this.walls[ this.walls.length - 1];
+            if (last_wall.x2 < canvas.width - this.distance) {
+                this.add_random_walls();
+            }
+        }
+    
+        // 2) lets move the existing walls towards the plane
+        for (var i = 0; i < this.walls.length; i++) {
+            this.walls[i].move(this.speed);
+        }
+    
+        // remove any wall, which reached the beginning of the canvas
+        this.walls = this.walls.filter( function(value, index, ass) {
+            return value.x2 > 0;
+        })
+    }
+
+    add_random_walls() {
+        var y1 = Math.random() * (canvas.height - this.gap);
+        var y2 = y1 + this.gap;
+    
+        var wall1 =  new Wall(0, y1);
+        var wall2 =  new Wall(y2, canvas.height);
+        
+        this.add(wall1);
+        this.add(wall2);
+    
+        // little hack, do not consider the lower wall for scoring to avoid double scores
+        wall2.scored = true;
+    }
+
+    // ToDo: ugly! wallMgr knows about internals of planes and planes about walls
+    check_collision(plane) {
+        for (var i = 0; i < this.walls.length; i++) {
+            var wall = this.walls[i];
+            var wall_collision = plane.check_wall_collision(wall);
+            if (wall_collision) {
+                return true;
+            }
+        }    
+
+        return false;
+    }
+
+    // ToDo: very ugly!! wallMgr knows about internals of score, hiscore and places
+    process_scores(plane, score, hiscore) {
+        for (var i = 0; i < this.walls.length; i++) {
+            var temp_wall = this.walls[i];
+            if (plane.check_wall_passed(temp_wall) && !temp_wall.scored) {
+                score.increase();
+                temp_wall.scored = true; // do not score this wall again!
+            }
+        }
+    
+        // see if the hiscore was broken
+        if (score.value > hiscore.value) {
+            hiscore.value = score.value;
+        }
     }
 }
 
@@ -164,6 +291,12 @@ class Plane {
         return false; // no collision
     }
 
+    //  check if the plane passed a specified wall successfully (true if passed)
+    check_wall_passed(wall) {
+        return (wall.x2 < plane.x);
+    }
+
+    // check if the plane collided with a specified wall (true if collided)
     check_wall_collision(wall) {
         var x_sensitivity = this.image.width * 0.1
         var y_sensitivity = this.image.height * 0.1
@@ -190,27 +323,22 @@ class Plane {
 // *****************************************************************
 // Global functions
 // *****************************************************************
-function init() {
+function init_game() {
     // init canvas for drawing
     canvas = document.getElementById('canvas');
     canvas.focus();                             
     ctx = canvas.getContext('2d');
 
-    // reset game elements
-    reset();
+    // reset game elements, including hiscore (reset_hiscore=true)
+    reset_game(true);
 
-    // hiscofr is not resetted, so it is initialized here!
-    myhiscore = new Score('Hiscore:', canvas.width - 220, 30);
-
-    // init start status
+    // init start status, we ar enot playing yet, but haning in the welcome screen
     playing = false;
 
-    var message1 = new Message("Welcome to Kunterbunt's Flappy!",150,100,0);
-    var message2 = new Message("Press <RETURN> key to start",150,130,0);
-    message2.font =  '12px serif';
-    mymessages.push(message1);
-    mymessages.push(message2);
-
+    var message1 = new Message("Welcome to Kunterbunt's Flappy!",160,100,0,'24px serif'); // setting TTL ndless
+    var message2 = new Message("Press <RETURN> key to start",160,130,0,'12px serif');
+    messageMgr.add(message1);
+    messageMgr.add(message2);
 
     // add event handlers
     canvas.addEventListener('mouseover', canvas_on_mouseover);
@@ -218,15 +346,20 @@ function init() {
     canvas.addEventListener('keydown', canvas_on_keydown);
 }
 
-function reset() {
-    myplane = new Plane(80,100);
-    myscore = new Score("Score:", canvas.width - 100, 30);
-    mywalls = [];
-    mymessages = []; 
+function reset_game(reset_hiscore) {
+    plane = new Plane(80,100);
+    score = new Score("Score:", canvas.width - 100, 30);
 
-    wall_distance = 250;
-    wall_gap = 150;
-    wall_speed = 2.5;
+    if(reset_hiscore) {
+        hiscore = new Score('Hiscore:', canvas.width - 220, 30);
+    }
+
+    messageMgr = new MessageMgr();
+    wallMgr = new WallMgr();
+
+    wallMgr.distance = STARTING_WALL_DISTANCE;
+    wallMgr.gap      = STARTING_WALL_GAP;
+    wallMgr.speed    = STARTING_WALL_SPEED;
 }
 
 function draw_scene(){
@@ -234,143 +367,34 @@ function draw_scene(){
     ctx.clearRect(0,0, canvas.width, canvas.height);
 
     // draw walls
-    for (var i = 0; i < mywalls.length; i++) {
-        mywalls[i].draw();
-    }
+    wallMgr.draw();
 
     // draw plane
-    myplane.draw();
+    plane.draw();
 
     // draw score and hiscore
-    myscore.draw();
-    if (myhiscore.value > myscore.value) {
-        myhiscore.draw();
+    score.draw();
+    if (hiscore.value > score.value) {
+        hiscore.draw();
     }
 
-    // draw all messages
-    for (var i = 0; i < mymessages.length; i++) {
-        mymessages[i].draw();
-    }
-}
- 
-function add_random_walls() {
-    y1 = Math.random() * (canvas.height - wall_gap);
-    y2 = y1 + wall_gap;
-
-    wall1 =  new Wall(0, y1);
-    wall2 =  new Wall(y2, canvas.height);
-    mywalls.push(wall1);
-    mywalls.push(wall2);
-
-    // little hack, do not consider the lower wall for scoring to avoid double scores
-    wall2.scored = true;
-}
-
-function process_walls() {
-    // 1) shall we add some walls?
-    if ( mywalls.length == 0) {
-        // if no walls yet, then add a new one for sure!!
-        add_random_walls(); 
-    } else {
-        // if we have walls, then check that we leave enough distance to last wall
-        last_wall = mywalls[ mywalls.length - 1];
-        if (last_wall.x2 < canvas.width - wall_distance) {
-            add_random_walls();
-        }
-    }
-
-    // 2) lets move the existing walls towards the plane
-    for (var i = 0; i < mywalls.length; i++) {
-        mywalls[i].move();
-    }
-
-    // remove any wall, which reached the beginning of the canvas
-    mywalls = mywalls.filter( function(value, index, ass) {
-        return value.x2 > 0;
-    })
-}
-
-function process_scores() {
-    for (var i = 0; i < mywalls.length; i++) {
-        temp_wall = mywalls[i];
-        if (temp_wall.x2 < myplane.x && !temp_wall.scored) {
-            myscore.increase();
-            temp_wall.scored = true; // do not score this wall again!
-        }
-    }
-
-    // see if the hiscore was broken
-    if (myscore.value > myhiscore.value) {
-        myhiscore.value = myscore.value;
-    }
-}
-
-function process_messages() {
-    // age each message and check if still alive
-    mymessages = mymessages.filter( function(value, index, ass) {
-        value.age();
-        return value.alive();
-    })
-}    
-
-function adjust_difficulty() {
-    // if we just started or the score was already processed, then leave it as is
-    if(myscore.value == 0 || myscore.processed) {
-        return;
-    }
-
-    // every 30 narrow the gap
-       if( myscore.value % 30 == 0) {
-        var message = new Message("Too easy? Lets narrow up!", 150,100,60);
-        mymessages.push(message);
-
-        wall_gap = wall_gap * 0.85;
-        myscore.processed = true;
-        return;
-    }
-
-    // every 15 narrow the distance
-       if( myscore.value % 15 == 0) {
-        var message = new Message("Still for dummies? We need more walls!", 150,100,60);
-        mymessages.push(message);
-
-        wall_distance = wall_distance * 0.85;
-        myscore.processed = true;
-        return;
-    }
-
-    // every 5 increase speed by 20%
-    if( myscore.value % 5 == 0) {
-        var message = new Message("Boring? Lets speed up!", 150,100,60);
-        mymessages.push(message);
-
-        wall_speed = wall_speed * 1.2;
-        myscore.processed = true;
-        return;
-    }
-
- 
+    messageMgr.draw();
 }
 
 function process_scene() {
     
-    process_walls();       // shall we add some walls?
-    myplane.move();         // move all objects in the scene
-    process_scores();   // check, if we need to increase the score
-    process_messages()     // remove any message, which exceeded time to live
+    wallMgr.process();                              // do we need to remove some walls, shall we add some walls?
+    plane.move();                                 // move all objects in the scene
+    wallMgr.process_scores(plane,score,hiscore);    // check, if we need to increase the score
+    messageMgr.age();                               // remove any message, which exceeded time to live
 
     // check for collisions
-    canvas_collision = myplane.check_canvas_collision();
-    for (var i = 0; i < mywalls.length; i++) {
-        wall_collision = myplane.check_wall_collision(mywalls[i]);
-        if (wall_collision) {
-            break;
-        }
-    }
+    canvas_collision = plane.check_canvas_collision();
+    wall_collision = wallMgr.check_collision(plane);
   
     // any collision ends the game
     if(canvas_collision || wall_collision) {
-        myplane.crashed = true;
+        plane.crashed = true;
         stop_game();
     } else {
         adjust_difficulty();
@@ -380,13 +404,49 @@ function process_scene() {
     draw_scene();
 }
 
+function adjust_difficulty() {
+    // if we just started or the score was already processed, then leave it as is
+    if(score.value == 0 || score.processed) {
+        return;
+    }
+
+    // every 30 narrow the gap
+       if( score.value % 30 == 0) {
+        var message = new Message("Too easy? Lets narrow up!");
+        messageMgr.add(message);
+
+        wallMgr.gap = wallMgr.gap * DIFFICULTY_ADJUSTMENT_GAP;
+        score.processed = true;
+        return;
+    }
+
+    // every 15 narrow the distance
+       if( score.value % 15 == 0) {
+        var message = new Message("Still for dummies? We need more walls!");
+        messageMgr.add(message);
+
+        wallMgr.distance = wallMgr.distance * DIFFICULTY_ADJUSTMENT_DISTANCE;
+        score.processed = true;
+        return;
+    }
+
+    // every 5 increase speed by 20%
+    if( score.value % 5 == 0) {
+        var message = new Message("Boring? Lets speed up!");
+        messageMgr.add(message);
+
+        wallMgr.speed = wallMgr.speed * DIFFICULTY_ADJUSTMENT_SPEED;
+        score.processed = true;
+        return;
+    }
+}
+
 function start_game() {
     playing = true;
-    reset();
+    reset_game(false);  // false = do not reset hi score
 
-    var message = new Message("Press <SPACE> to control plane!",150,130,60);
-    message.font =  '24px serif';
-    mymessages.push(message);
+    var message = new Message("Press <SPACE> to control plane!");
+    messageMgr.add(message);
 
     raf = window.requestAnimationFrame(process_scene);   // start animation
 }
@@ -394,10 +454,9 @@ function start_game() {
 function stop_game() {
     playing = false;
 
-    mymessages = [];  // get rid of old messages
-    var message = new Message("Press <RETURN> to retry!",150,130,0);
-    message.font =  '24px serif';
-    mymessages.push(message);
+    messageMgr.clear();
+    var message = new Message("Press <RETURN> to retry!");
+    messageMgr.add(message);
 
     window.cancelAnimationFrame(raf);
 }
@@ -415,7 +474,7 @@ function canvas_on_mouseout(e) {
 // on mousedown: accellerate plane upwards or start game, depending on status
 function canvas_on_keydown(e) {
     if(playing && e.code == "Space") {
-        myplane.accellerate(-4);
+        plane.accellerate(-4);
     } 
     
     if (!playing && e.code == "Enter") {
@@ -425,5 +484,5 @@ function canvas_on_keydown(e) {
   
 
 // draw initial screen
-init();
+init_game();
 draw_scene();
